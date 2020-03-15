@@ -31,7 +31,9 @@ namespace Crosswords
             _pattern = string.IsNullOrEmpty(pattern) || pattern.All(c => c == '_')
                 ? null
                 : pattern.ToUpperInvariant();
-            _desiredWordLength = length == 0 ? (int?)null : length;
+            _desiredWordLength = length == 0 
+                ? (int?)null 
+                : length;
             _patternLength = length == 0 && !string.IsNullOrEmpty(_pattern)
                 ? pattern.Length
                 : (int?)null;
@@ -39,26 +41,30 @@ namespace Crosswords
                 .Where(row => row.Words
                 .Any(entry => entry.Equals(searchWord, StringComparison.OrdinalIgnoreCase)))
                 .ToList();
+            // May find more than one synset containing the search word, in cases where a word has multiple meanings. Also note each synset may contain several words (synonyms)
             return matches.Any()
-                ? FindConnectedSynsets(matches) 
+                ? FindSynsetsRelatedToInitialHits(matches) 
                 : null;
         }
 
-        private List<SearchResultEntry> FindConnectedSynsets(List<Synset> matches)
+        private List<SearchResultEntry> FindSynsetsRelatedToInitialHits(List<Synset> matches)
         {
             var response = new List<SearchResultEntry>();
-            foreach (var match in matches)
+            foreach (var synset in matches)
             {
-                var aggregateWord = string.Join(", ", match.Words.Select(row => row).ToList());
-                foreach (var entry in match.Words)
+                var wordsInSynset = string.Join(", ", synset.Words.Select(row => row).ToList());
+                foreach (var entry in synset.Words)
                 {
-                    AddWord(entry, "", match.Pos, match.Gloss, response);
+                    AddWordToResultSet(entry, "", synset.Pos, synset.Gloss, response);
                 }
-                foreach (var pointer in match.SynsetPointers)
+                foreach (var pointer in synset.SynsetPointers)
                 {
-                    GetSynonyms(response, pointer.Synset, aggregateWord, 1);
+                    // Follow the links from each initial synset hit to to other synset entries, adding them to the result. 
+                    // Recurses to the desired recursion depth.
+                    GetLinkedSynsets(response, pointer.Synset, wordsInSynset, 1);
                 }
             }
+            // Orders the result set a bit differently depending on whether we want a simple or verbose result set.
             List<SearchResultEntry> result = _desiredWordLength == 0
                 ? response.OrderBy(row => row.Relation.Length != 0)
                     .ThenBy(row => row.Word.Length)
@@ -69,13 +75,15 @@ namespace Crosswords
                     .ToList();
             if (!_verbose)
             {
-                result = result.Distinct().ToList();
+                // Duplicate words are removed from the simple result set. They are kept in the verbose one because
+                // they are different meanings of the same word.
+                result = result.Distinct().ToList(); 
             }
             return result;
         }
 
 
-        private void AddWord(string word, string relationship, string pos, string gloss, List<SearchResultEntry> synonymList)
+        private void AddWordToResultSet(string word, string relationship, string pos, string gloss, List<SearchResultEntry> synonymList)
         {
             if (!synonymList.Any(row => row.Word == word && row.Gloss == gloss))
             {
@@ -115,31 +123,35 @@ namespace Crosswords
             return true;
         }
 
-        private void GetSynonyms(List<SearchResultEntry> synonymList, string synset, string sourceWord, int recurseCount)
+        private void GetLinkedSynsets(List<SearchResultEntry> synonymList, string synsetId, string wordsInSourceSynset, int recurseCount)
         {
             recurseCount++;
             if (recurseCount > _maxRecurseDepth)
             {
                 return;
             }
-            var hit = WordNetData.SynsetDictionary[synset];
-            var aggregateWord = string.Join(", ", hit.Words.Select(row => row).ToList());
+            var synset = WordNetData.SynsetDictionary[synsetId];
+            var wordsInSynset = string.Join(", ", synset.Words.Select(row => row).ToList());
             var relationships = new List<string>();
-            foreach (var hitPointer in hit.SynsetPointers)
+            foreach (var pointer in synset.SynsetPointers)
             {
-                string s = $"{WordNetData.Relationships.First(row => row.Key == hitPointer.Symbol).Value} of {sourceWord}";
+                string s = $"{WordNetData.Relationships.First(row => row.Key == pointer.Symbol).Value} of {wordsInSourceSynset}";
+                // Examples:
+                // ("fish" is a) "Hypernym of shark" 
+                // ("shark" is a) "DerivationallyRelatedForm of fish" 
+                // ("approval" is a) "Hypernym of praise, congratulations, kudos, extolment" - praise/congratulations/kudos/extolment are four synonyms in a single synset
                 if (!relationships.Contains(s))
                 {
                     relationships.Add(s);
                 }
             }
-            foreach (var word in hit.Words)
+            foreach (var word in synset.Words)
             {
-                AddWord(word, string.Join(", ", relationships), hit.Pos, hit.Gloss, synonymList);
+                AddWordToResultSet(word, string.Join(", ", relationships), synset.Pos, synset.Gloss, synonymList);
             }
-            foreach (var hitPointer in hit.SynsetPointers)
+            foreach (var pointer in synset.SynsetPointers)
             {
-                GetSynonyms(synonymList, hitPointer.Synset, aggregateWord, recurseCount);
+                GetLinkedSynsets(synonymList, pointer.Synset, wordsInSynset, recurseCount);
             }
         }
     }
